@@ -13,15 +13,14 @@
 int player_sequence_no = 0;
 int game_counter =0;
 
-
 typedef struct { int x, y; } Position;
 
 const int dx[4] = {-1, 0, 1, 0}; // LEFT, UP, RIGHT, DOWN
 const int dy[4] = {0, 1, 0, -1};
-
-uint64_t grid[GRID_SIZE] = {0};
-Position tails[PLAYERS];
-Position trails[PLAYERS][MAX_TRAIL];
+//Initial conditions
+uint64_t grid[GRID_SIZE] = {0}; //Bitpacked grid to trace trails, Complete grid is free
+Position tails[PLAYERS];        //To track players new position
+Position trails[PLAYERS][MAX_TRAIL]; //Trails of all the players
 int trail_lengths[PLAYERS];
 int is_alive[PLAYERS] = {1, 1, 1, 1};
 int last_dirs[PLAYERS] = {0, 0, 0, 0};
@@ -41,6 +40,8 @@ void send_Move();
 void die();
 
 void set_grid(int x, int y, int v) {
+// Grid is set to 1 if a player moves to (x,y)
+// Grid is set to 0 if a player is dead
     x = (x + GRID_SIZE) % GRID_SIZE;
     y = (y + GRID_SIZE) % GRID_SIZE;
     if (v) grid[y] |= (1ULL << x);
@@ -48,12 +49,14 @@ void set_grid(int x, int y, int v) {
 }
 
 int get_grid(int x, int y) {
+// return the value of the grid in (x,y) coordinate
     x = (x + GRID_SIZE) % GRID_SIZE;
     y = (y + GRID_SIZE) % GRID_SIZE;
     return (grid[y] >> x) & 1;
 }
 
 void clear_trail(int pid) {
+//Once a player is dead, the complete trail of that player is cleared
     for (int i = 0; i < trail_lengths[pid]; i++) {
         int x = trails[pid][i].x, y = trails[pid][i].y;
         int still_used = 0;
@@ -70,7 +73,10 @@ void clear_trail(int pid) {
     }
     trail_lengths[pid] = 0;
 }
-
+// Predicts the next head positions of all opponent players based on their last known direction
+// Parameters:
+// - predicted_heads: Array to store predicted head positions for each player
+// - player_seq_num: ID of the current player (excluded from prediction)
 void predict_opponents_heads(Position predicted_heads[PLAYERS], int player_seq_num) {
     for (int p = 0; p < PLAYERS; p++) {
         if (!is_alive[p] || p == player_seq_num) continue;
@@ -80,6 +86,12 @@ void predict_opponents_heads(Position predicted_heads[PLAYERS], int player_seq_n
     }
 }
 
+// Checks if a given position is predicted to be an opponent's head
+// Parameters:
+// - x, y: Coordinates to check
+// - predicted_heads: Array of predicted opponent head positions
+// - player_seq_num: ID of the current player (excluded from check)
+// Returns: 1 if position is a predicted head, 0 otherwise
 int is_predicted_head(int x, int y, Position predicted_heads[PLAYERS], int player_seq_num) {
     for (int p = 0; p < PLAYERS; p++) {
         if (!is_alive[p] || p == player_seq_num) continue;
@@ -88,6 +100,14 @@ int is_predicted_head(int x, int y, Position predicted_heads[PLAYERS], int playe
     return 0;
 }
 
+// Performs BFS to calculate the reachable area from a starting position
+// Parameters:
+// - sx, sy: Starting coordinates
+// - depth_limit: Maximum BFS depth (e.g., 6)
+// - predicted_heads: Array of predicted opponent head positions
+// - player_seq_num: ID of the current player
+// - wall_dist: Pointer to store minimum distance to grid edges
+// Returns: Number of reachable cells (area)
 int bfs_area(int sx, int sy, int depth_limit, Position predicted_heads[PLAYERS], int player_seq_num, int *wall_dist) {
     uint8_t visited[GRID_SIZE][GRID_SIZE] = {{0}};
     int queue_x[GRID_SIZE * GRID_SIZE], queue_y[GRID_SIZE * GRID_SIZE], queue_d[GRID_SIZE * GRID_SIZE];
@@ -113,12 +133,13 @@ int bfs_area(int sx, int sy, int depth_limit, Position predicted_heads[PLAYERS],
         int x = queue_x[front], y = queue_y[front], d = queue_d[front];
         front++;
         if (d >= depth_limit) continue;
-
+        // Explore four directions (LEFT, UP, RIGHT, DOWN)
         for (int dir = 0; dir < 4; dir++) {
             int nx = (x + dx[dir] + GRID_SIZE) % GRID_SIZE;
             int ny = (y + dy[dir] + GRID_SIZE) % GRID_SIZE;
+            // Skip if cell is visited, occupied, or predicted to be an opponent's head
             if (visited[ny][nx] || get_grid(nx, ny) || is_predicted_head(nx, ny, predicted_heads, player_seq_num)) continue;
-
+            // Mark cell as visited and enqueue it
             visited[ny][nx] = 1;
             queue_x[back] = nx;
             queue_y[back] = ny;
@@ -141,6 +162,10 @@ int bfs_area(int sx, int sy, int depth_limit, Position predicted_heads[PLAYERS],
     return area;
 }
 
+// Decides the next move for the current player
+// Parameters:
+// - player_seq_num: ID of the current player
+// Returns: Move direction (1=UP, 2=RIGHT, 3=DOWN, 4=LEFT)
 int decide_move(int player_seq_num) {
     int x = tails[player_seq_num].x, y = tails[player_seq_num].y;
     Position predicted_heads[PLAYERS] = {{0}};
@@ -157,26 +182,16 @@ int decide_move(int player_seq_num) {
 
         int wall_dist;
         int score = bfs_area(nx, ny, 6, predicted_heads, player_seq_num, &wall_dist);
-
+        // Update best move if this move has larger area or same area but closer to edge
         if (score > best_score || (score == best_score && wall_dist < best_wall)) {
             best_score = score;
             best_wall = wall_dist;
             best_dir = d;
         }
     }
-
-    if (best_dir == -1) return last_dirs[player_sequence_no]; // Default to LEFT if no safe move
+    // If no safe move, return the last direction used
+    if (best_dir == -1) return last_dirs[player_sequence_no];
     return output_map[best_dir]; // Map internal direction to new output
-}
-
-int get_opponent_move(int pid) {
-    int x = tails[pid].x, y = tails[pid].y;
-    for (int d = 0; d < 4; d++) {
-        int nx = (x + dx[d] + GRID_SIZE) % GRID_SIZE;
-        int ny = (y + dy[d] + GRID_SIZE) % GRID_SIZE;
-        if (!get_grid(nx, ny)) return d;
-    }
-    return 0; // Default LEFT if stuck
 }
 
 void update_grid(const int *new_positions, int player_seq_num) {
@@ -235,6 +250,8 @@ void update_grid(const int *new_positions, int player_seq_num) {
     set_grid(nx, ny, 1);
 }
 
+
+// Setting the 1st 6 elements of the Array as the Opponents coordinates based on our player_seq_num
 void filterArrayInPlace(int arr[], int player_seq_num) {
   int remove_idx1 = player_seq_num * 2;
   int remove_idx2 = player_seq_num * 2 + 1;
@@ -348,7 +365,7 @@ void rename_function(){
     CAN.write((uint8_t*)&msg_rename, sizeof(MSG_Rename));
     CAN.endPacket();
 
-    // Send RemaneFollow for remaining characters
+    // Send RenameFollow for remaining characters
     for (int offset = 6; offset < msg_rename.size; offset += 7) {
       MSG_RenameFollow followMsg;
       followMsg.PlayerID = player_ID;
@@ -375,14 +392,14 @@ void send_GameAck(){
     
   }
   for (int i =0; i<4; i++){
+    //Once GameAck is received reset all the States to initial conditions
     clear_trail(i);
     last_dirs[i] = 0;
-      is_alive[i] = 1;
-      tails[i].x = 0;
-      tails[i].y = 0;
-      trail_lengths[i] = 0;
+    is_alive[i] = 1;
+    tails[i].x = 0;
+    tails[i].y = 0;
+    trail_lengths[i] = 0;
     if(arr[i]==player_ID){
-      
       player_sequence_no = i;
       
     }
@@ -417,27 +434,29 @@ void send_Move(){
         trails[player_sequence_no][trail_lengths[player_sequence_no]++] = (Position){arr[player_sequence_no*2], arr[player_sequence_no*2+1]};
     set_grid(arr[player_sequence_no*2], arr[player_sequence_no*2 +1], 1);
 
-  // Get Player positions from GameState information
-  filterArrayInPlace(arr, player_sequence_no);
-  
-  MSG_Move msg_move;
-  msg_move.PlayerID = player_ID;
+    // Get Player positions from GameState information
+    filterArrayInPlace(arr, player_sequence_no);
 
+    MSG_Move msg_move;
+    msg_move.PlayerID = player_ID;
 
-  int direction_array[4] = {(rand() % 2) ? 1 : 4,2,2,(rand() % 2) ? 1 : 4};
-  if(game_counter == 0){
+    //For the initial movement select a random direction
+    int direction_array[4] = {(rand() % 2) ? 1 : 4,2,2,(rand() % 2) ? 1 : 4};
+    if(game_counter == 0){
     msg_move.Direction = direction_array[player_sequence_no];
     game_counter = game_counter+1;
-  }
-  
-  else{
+    }
+
+    else{
+    //For the next movement use the algorithm, as only after the 1st move, Opponents coordinates are known
     msg_move.Direction = decide_move(player_sequence_no); 
-  }
-  
-  CAN.beginPacket(Move);
-  CAN.write((uint8_t*)&msg_move, sizeof(MSG_Move));
-  CAN.endPacket();
-  update_grid(arr, player_sequence_no);
+    }
+
+    CAN.beginPacket(Move);
+    CAN.write((uint8_t*)&msg_move, sizeof(MSG_Move));
+    CAN.endPacket();
+    //After the new coordinates is sent, Update the grid to track the trails
+    update_grid(arr, player_sequence_no);
 
 }
 
